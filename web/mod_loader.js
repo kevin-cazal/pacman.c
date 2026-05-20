@@ -193,7 +193,7 @@
             }
             if (tries > 200) {
                 clearInterval(timer);
-                showError("WASM mod API timeout — rebuild pacman.html");
+                showError("WASM mod API timeout — rebuild index.html");
             }
         }, 50);
     }

@@ -53,6 +53,7 @@ endif()
 target_link_libraries(pacman sokol lua_mod)
 if (CMAKE_SYSTEM_NAME STREQUAL Emscripten)
     set(CMAKE_EXECUTABLE_SUFFIX ".html")
+    set_target_properties(pacman PROPERTIES OUTPUT_NAME "index")
     target_link_options(pacman PUBLIC --shell-file ${CMAKE_SOURCE_DIR}/web/shell_mod.html)
     target_link_options(pacman PUBLIC -sUSE_WEBGL2=1 -sNO_FILESYSTEM=1 -sASSERTIONS=0 -sMALLOC=emmalloc --closure=1)
     target_link_options(pacman PUBLIC "-sEXPORTED_RUNTIME_METHODS=['cwrap','ccall']")
@@ -69,7 +70,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL Emscripten)
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_SOURCE_DIR}/web/monaco
             $<TARGET_FILE_DIR:pacman>/monaco
-        COMMENT "Copy mod lab HTML/JS/Monaco beside pacman.html")
+        COMMENT "Copy mod lab HTML/JS/Monaco beside index.html")
 endif()
 if (MSVC)
     target_compile_options(pacman PUBLIC /W3)

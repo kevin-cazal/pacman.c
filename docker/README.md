@@ -48,7 +48,7 @@ docker build -f docker/Dockerfile.wasm -t pacman-wasm .
 docker run --rm -p 8080:8080 pacman-wasm
 ```
 
-Open [http://localhost:8080/pacman.html](http://localhost:8080/pacman.html).
+Open [http://localhost:8080/](http://localhost:8080/) (serves `index.html`).
 
 Build only (output in `build-wasm/` on the host):
 

@@ -2,7 +2,7 @@
 
 A Pacman clone written in C99 with minimal dependencies for Windows, macOS, Linux and WASM.
 
-[WASM version](https://floooh.github.io/pacman.c/pacman.html)
+[WASM version (GitHub Pages)](https://kevin-cazal.github.io/pacman.c/)
 
 For implementation details see comments in the pacman.c source file (I've tried
 to structure the source code so that it can be read from top to bottom).
@@ -55,7 +55,7 @@ cmake --build build
 
 The WASM build embeds `mods/default.lua` (vanilla behavior). Rebuild after editing that file.
 
-Quick build (native + WASM): `./build.sh` (uses local cmake/emcc when available, otherwise Docker). The WASM mod lab uses a self-hosted Monaco editor for Lua (`./scripts/vendor-monaco.sh` runs automatically on first `./build.sh wasm`).
+Quick build (native + WASM): `./build.sh` (uses local cmake/emcc when available, otherwise Docker). The WASM mod lab uses a self-hosted Monaco editor for Lua (`./scripts/vendor-monaco.sh` runs automatically on first `./build.sh wasm`). Pushes to `main` deploy the WASM build to GitHub Pages (`index.html` at the site root).
 
 Docker images: see [docker/README.md](docker/README.md) (`docker/Dockerfile.native`, `docker/Dockerfile.wasm`).
 
@@ -81,7 +81,7 @@ cmake --build .
 To run the compilation result in the system web browser:
 
 ```
-> emrun pacman.html
+> emrun index.html
 ```
 
 ## IDE Support

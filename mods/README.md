@@ -14,14 +14,14 @@ Without `--mod`, the embedded `mods/default.lua` is used (vanilla behavior).
 
 ## WASM mod lab (browser)
 
-The Emscripten build uses `web/shell_mod.html`, `web/mod_loader.js`, `web/mod_editor.js`, self-hosted Monaco (`web/monaco/vs/`), and `web/mod_lab.html` (copied next to `pacman.html`). The mod pane is a Monaco editor with Lua syntax highlighting. Click the **Lua mod** pane to edit; click the **game** pane to play. **Load mod** applies Lua and restarts play.
+The Emscripten build uses `web/shell_mod.html`, `web/mod_loader.js`, `web/mod_editor.js`, self-hosted Monaco (`web/monaco/vs/`), and `web/mod_lab.html` (copied next to `index.html`). The mod pane is a Monaco editor with Lua syntax highlighting. Click the **Lua mod** pane to edit; click the **game** pane to play. **Load mod** applies Lua and restarts play.
 
 ```bash
 ./build.sh wasm   # runs scripts/vendor-monaco.sh if web/monaco/ is missing
 python3 -m http.server -d build-wasm/
 ```
 
-Open `mod_lab.html` or `pacman.html`. To vendor Monaco only: `./scripts/vendor-monaco.sh`.
+Open `index.html` or `mod_lab.html`. GitHub Pages deploys the staged `site/` output via `.github/workflows/pages.yml`. To vendor Monaco only: `./scripts/vendor-monaco.sh`.
 
 ## Pacman hooks
 

@@ -3,7 +3,7 @@
 # Usage:
 #   ./build.sh              # both targets
 #   ./build.sh native       # build/pacman only
-#   ./build.sh wasm         # build-wasm/pacman.html only
+#   ./build.sh wasm         # build-wasm/index.html only
 #   ./build.sh --docker     # force Docker (no local cmake/emcc required)
 #   ./build.sh --local      # require local cmake / emscripten on PATH
 set -euo pipefail
@@ -61,7 +61,7 @@ build_wasm_local() {
     echo "==> WASM (local emscripten)"
     emcmake cmake -B build-wasm -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=MinSizeRel
     cmake --build build-wasm $(jflag)
-    echo "    -> build-wasm/pacman.html"
+    echo "    -> build-wasm/index.html"
 }
 
 build_native_docker() {
@@ -90,7 +90,7 @@ build_wasm_docker() {
         emcmake cmake -B build-wasm -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=MinSizeRel
         cmake --build build-wasm -j"$(nproc)"
     '
-    echo "    -> build-wasm/pacman.html"
+    echo "    -> build-wasm/index.html"
 }
 
 pick_mode() {
