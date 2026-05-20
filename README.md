@@ -44,6 +44,21 @@ On Windows, the executable is in a subdirectory:
 Debug/pacman.exe
 ```
 
+## Lua mods (branch `feature/lua-mods`)
+
+Pacman and ghost AI can be customized with Lua mod files. See [mods/README.md](mods/README.md) for the hook API and examples.
+
+```bash
+cmake --build build
+./build/pacman --mod mods/aggressive_blinky.lua
+```
+
+The WASM build embeds `mods/default.lua` (vanilla behavior). Rebuild after editing that file.
+
+Quick build (native + WASM): `./build.sh` (uses local cmake/emcc when available, otherwise Docker). The WASM mod lab uses a self-hosted Monaco editor for Lua (`./scripts/vendor-monaco.sh` runs automatically on first `./build.sh wasm`).
+
+Docker images: see [docker/README.md](docker/README.md) (`docker/Dockerfile.native`, `docker/Dockerfile.wasm`).
+
 ## Build and Run WASM/HTML version via Emscripten
 
 > NOTE: You'll run into various problems running the Emscripten SDK tools on Windows, might be better to run this stuff in WSL.

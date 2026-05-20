@@ -1,0 +1,7 @@
+/* Auto-generated from mods/default.lua — do not edit */
+#include <stddef.h>
+
+const char pacman_mod_default_lua[] =
+"@PACMAN_MOD_LUA_CONTENT@";
+
+const size_t pacman_mod_default_lua_len = sizeof(pacman_mod_default_lua) - 1;

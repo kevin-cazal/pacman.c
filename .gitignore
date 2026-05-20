@@ -1,5 +1,7 @@
 .vscode/
 build/
+build-wasm/
+web/monaco/
 
 # nix
 result/

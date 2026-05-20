@@ -136,9 +136,14 @@
 #include "sokol_log.h"
 #include "sokol_glue.h"
 #include "sokol_letterbox.h"
+#include "lua_mod.h"
 #include <assert.h>
 #include <string.h> // memset()
 #include <stdlib.h> // abs()
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 // config defines and global constants
 #define AUDIO_VOLUME (0.5f)
@@ -705,6 +710,18 @@ static void snd_clear(void);
 static void snd_start(int sound_slot, const sound_desc_t* snd);
 static void snd_stop(int sound_slot);
 
+static int g_argc;
+static char** g_argv;
+
+static bool skip_intro_from_args(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--skip-intro") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // forward-declared ROM dumps
 static const uint8_t rom_tiles[4096];
 static const uint8_t rom_sprites[4096];
@@ -714,7 +731,8 @@ static const uint8_t rom_wavetable[256];
 
 /*== APPLICATION ENTRY AND CALLBACKS =========================================*/
 sapp_desc sokol_main(int argc, char* argv[]) {
-    (void)argc; (void)argv;
+    g_argc = argc;
+    g_argv = argv;
     return (sapp_desc) {
         .init_cb = init,
         .frame_cb = frame,
@@ -725,18 +743,29 @@ sapp_desc sokol_main(int argc, char* argv[]) {
         .window_title = "pacman.c",
         .icon.sokol_default = true,
         .logger.func = slog_func,
+        .html5 = {
+            /* allow typing in the mod-lab textarea while the game is on the same page */
+            .bubble_key_events = true,
+            .bubble_char_events = true,
+        },
     };
 }
 
 static void init(void) {
     gfx_init();
     snd_init();
+    lua_mod_init(g_argc, g_argv);
 
-    // start into intro screen
+    // start into intro screen (or game if --skip-intro / DBG_SKIP_INTRO)
     #if DBG_SKIP_INTRO
         start(&state.game.started);
     #else
-        start(&state.intro.started);
+        if (skip_intro_from_args(g_argc, g_argv)) {
+            start(&state.game.started);
+        }
+        else {
+            start(&state.intro.started);
+        }
     #endif
 }
 
@@ -816,6 +845,7 @@ static void input(const sapp_event* ev) {
 }
 
 static void cleanup(void) {
+    lua_mod_shutdown();
     snd_shutdown();
     gfx_shutdown();
 }
@@ -1230,6 +1260,46 @@ static int2_t pixel_to_tile_pos(int2_t pix_pos) {
     return i2(pix_pos.x / TILE_WIDTH, pix_pos.y / TILE_HEIGHT);
 }
 
+static lua_mod_i2_t lua_mod_tile_pos(int2_t p) {
+    int2_t t = pixel_to_tile_pos(p);
+    return (lua_mod_i2_t){ t.x, t.y };
+}
+
+static lua_mod_pacman_ctx_t lua_mod_make_pacman_ctx(void) {
+    const actor_t* a = &state.game.pacman.actor;
+    return (lua_mod_pacman_ctx_t) {
+        .tick = state.timing.tick,
+        .round = state.game.round,
+        .freeze = state.game.freeze,
+        .dir = (lua_mod_dir_t)a->dir,
+        .pos = lua_mod_tile_pos(a->pos),
+        .input_up = state.input.up,
+        .input_down = state.input.down,
+        .input_left = state.input.left,
+        .input_right = state.input.right,
+        .dot_eaten = now(state.game.dot_eaten),
+        .pill_eaten = now(state.game.pill_eaten) || (since(state.game.pill_eaten) < 3),
+    };
+}
+
+static lua_mod_ghost_ctx_t lua_mod_make_ghost_ctx(const ghost_t* ghost, ghoststate_t new_state) {
+    return (lua_mod_ghost_ctx_t) {
+        .tick = state.timing.tick,
+        .round = state.game.round,
+        .freeze = state.game.freeze,
+        .type = (lua_mod_ghosttype_t)ghost->type,
+        .state = (lua_mod_ghoststate_t)ghost->state,
+        .new_state = (lua_mod_ghoststate_t)new_state,
+        .dir = (lua_mod_dir_t)ghost->actor.dir,
+        .next_dir = (lua_mod_dir_t)ghost->next_dir,
+        .pos = lua_mod_tile_pos(ghost->actor.pos),
+        .target_pos = { ghost->target_pos.x, ghost->target_pos.y },
+        .pacman_pos = lua_mod_tile_pos(state.game.pacman.actor.pos),
+        .frightened = now(ghost->frightened),
+        .eaten = now(ghost->eaten),
+    };
+}
+
 // clamp tile pos to valid playfield coords
 static int2_t clamped_tile_pos(int2_t tile_pos) {
     int2_t res = tile_pos;
@@ -1441,6 +1511,35 @@ static void game_disable_timers(void) {
     disable(&state.game.force_leave_house);
     disable(&state.game.fruit_active);
 }
+
+// restart play from game prelude (used when reloading a Lua mod in WASM)
+void pacman_restart_game(void) {
+    snd_clear();
+    spr_clear();
+    game_disable_timers();
+    disable(&state.game.started);
+    disable(&state.game.ready_started);
+    disable(&state.game.round_started);
+    disable(&state.game.game_over);
+    disable(&state.intro.started);
+    disable(&state.gfx.fadeout);
+    disable(&state.gfx.fadein);
+    state.gamestate = GAMESTATE_GAME;
+    state.input.anykey = false;
+    state.input.esc = false;
+    input_enable();
+    start(&state.game.started);
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE void wasm_set_game_input(int enabled) {
+    if (enabled) {
+        input_enable();
+    } else {
+        input_disable();
+    }
+}
+#endif
 
 // one-time init at start of game state
 static void game_init(void) {
@@ -1730,17 +1829,26 @@ static void game_update_sprites(void) {
 // return true if Pacman should move in this tick, when eating dots, Pacman
 // is slightly slower than ghosts, otherwise slightly faster
 static bool game_pacman_should_move(void) {
+    bool c_default;
     if (now(state.game.dot_eaten)) {
         // eating a dot causes Pacman to stop for 1 tick
-        return false;
+        c_default = false;
     }
     else if (since(state.game.pill_eaten) < 3) {
         // eating an energizer pill causes Pacman to stop for 3 ticks
-        return false;
+        c_default = false;
     }
     else {
-        return 0 != (state.timing.tick % 8);
+        c_default = 0 != (state.timing.tick % 8);
     }
+    if (lua_mod_active()) {
+        lua_mod_pacman_ctx_t ctx = lua_mod_make_pacman_ctx();
+        bool out;
+        if (lua_mod_pacman_should_move(&ctx, c_default, &out)) {
+            return out;
+        }
+    }
+    return c_default;
 }
 
 // return number of pixels a ghost should move this tick, this can't be a simple
@@ -1748,28 +1856,36 @@ static bool game_pacman_should_move(void) {
 // than one pixel per tick
 static int game_ghost_speed(const ghost_t* ghost) {
     assert(ghost);
+    int c_default;
     switch (ghost->state) {
         case GHOSTSTATE_HOUSE:
         case GHOSTSTATE_LEAVEHOUSE:
-            // inside house at half speed (estimated)
-            return state.timing.tick & 1;
+            c_default = state.timing.tick & 1;
+            break;
         case GHOSTSTATE_FRIGHTENED:
-            // move at 50% speed when frightened
-            return state.timing.tick & 1;
+            c_default = state.timing.tick & 1;
+            break;
         case GHOSTSTATE_EYES:
         case GHOSTSTATE_ENTERHOUSE:
-            // estimated 1.5x when in eye state, Pacman Dossier is silent on this
-            return (state.timing.tick & 1) ? 1 : 2;
+            c_default = (state.timing.tick & 1) ? 1 : 2;
+            break;
         default:
             if (is_tunnel(pixel_to_tile_pos(ghost->actor.pos))) {
-                // move drastically slower when inside tunnel
-                return ((state.timing.tick * 2) % 4) ? 1 : 0;
+                c_default = ((state.timing.tick * 2) % 4) ? 1 : 0;
             }
             else {
-                // otherwise move just a bit slower than Pacman
-                return (state.timing.tick % 7) ? 1 : 0;
+                c_default = (state.timing.tick % 7) ? 1 : 0;
             }
+            break;
     }
+    if (lua_mod_active()) {
+        lua_mod_ghost_ctx_t ctx = lua_mod_make_ghost_ctx(ghost, ghost->state);
+        int out;
+        if (lua_mod_ghost_speed(&ctx, c_default, &out)) {
+            return out;
+        }
+    }
+    return c_default;
 }
 
 // return the current global scatter or chase phase
@@ -1853,6 +1969,13 @@ static void game_update_ghost_state(ghost_t* ghost) {
             else {
                 new_state = game_scatter_chase_phase();
             }
+    }
+    if (lua_mod_active()) {
+        lua_mod_ghoststate_t ls;
+        lua_mod_ghost_ctx_t ctx = lua_mod_make_ghost_ctx(ghost, new_state);
+        if (lua_mod_ghost_update_state(&ctx, (lua_mod_ghoststate_t)new_state, &ls)) {
+            new_state = (ghoststate_t)ls;
+        }
     }
     // handle state transitions
     if (new_state != ghost->state) {
@@ -1946,6 +2069,14 @@ static void game_update_ghost_target(ghost_t* ghost) {
             break;
         default:
             break;
+    }
+    if (lua_mod_active()) {
+        lua_mod_ghost_ctx_t ctx = lua_mod_make_ghost_ctx(ghost, ghost->state);
+        lua_mod_i2_t lpos;
+        lua_mod_i2_t cpos = { pos.x, pos.y };
+        if (lua_mod_ghost_target(&ctx, cpos, &lpos)) {
+            pos = i2(lpos.x, lpos.y);
+        }
     }
     ghost->target_pos = pos;
 }
@@ -2041,6 +2172,13 @@ static bool game_update_ghost_dir(ghost_t* ghost) {
                     }
                 }
             }
+            if (lua_mod_active()) {
+                lua_mod_dir_t ldir;
+                lua_mod_ghost_ctx_t ctx = lua_mod_make_ghost_ctx(ghost, ghost->state);
+                if (lua_mod_ghost_choose_dir(&ctx, (lua_mod_dir_t)ghost->next_dir, &ldir)) {
+                    ghost->next_dir = (dir_t)ldir;
+                }
+            }
         }
         return false;
     }
@@ -2112,7 +2250,15 @@ static void game_update_actors(void) {
     if (game_pacman_should_move()) {
         // move Pacman with cornering allowed
         actor_t* actor = &state.game.pacman.actor;
-        const dir_t wanted_dir = input_dir(actor->dir);
+        dir_t wanted_dir = input_dir(actor->dir);
+        if (lua_mod_active()) {
+            lua_mod_pacman_ctx_t ctx = lua_mod_make_pacman_ctx();
+            lua_mod_dir_t ldir;
+            if (lua_mod_pacman_wanted_dir(&ctx, (lua_mod_dir_t)wanted_dir, &ldir)) {
+                wanted_dir = (dir_t)ldir;
+            }
+            lua_mod_pacman_on_tick(&ctx);
+        }
         const bool allow_cornering = true;
         // look ahead to check if the wanted direction is blocked
         if (can_move(actor->pos, wanted_dir, allow_cornering)) {
