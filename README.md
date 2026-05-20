@@ -2,6 +2,8 @@
 
 A Pacman clone written in C99 with minimal dependencies for Windows, macOS, Linux and WASM.
 
+[![Deploy WASM to GitHub Pages](https://github.com/kevin-cazal/pacman.c/actions/workflows/pages.yml/badge.svg)](https://github.com/kevin-cazal/pacman.c/actions/workflows/pages.yml)
+
 [WASM version (GitHub Pages)](https://kevin-cazal.github.io/pacman.c/)
 
 For implementation details see comments in the pacman.c source file (I've tried

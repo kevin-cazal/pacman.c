@@ -34,6 +34,9 @@ jobs:
       - name: Stage site
         run: ./scripts/stage-pages.sh build-wasm site
 
+      - name: List staged files
+        run: find site -type f | sort
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
@@ -52,3 +55,6 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Published URL
+        run: echo "::notice::Deployed to ${{ steps.deployment.outputs.page_url }}"
