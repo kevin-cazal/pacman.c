@@ -1,0 +1,20 @@
+# WASM/HTML build via Emscripten (embedded default Lua mod)
+# Build:  docker build -f docker/Dockerfile.wasm -t pacman-wasm .
+# Serve:  docker run --rm -p 8080:8080 pacman-wasm
+
+FROM emscripten/emsdk:latest AS build
+
+WORKDIR /src
+COPY . .
+
+RUN emcmake cmake -B build-wasm -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=MinSizeRel \
+    && cmake --build build-wasm -j"$(nproc)"
+
+# Minimal image to serve static output
+FROM python:3.12-alpine AS runtime
+
+WORKDIR /srv
+COPY --from=build /src/build-wasm/pacman.html /src/build-wasm/pacman.js /src/build-wasm/pacman.wasm ./
+
+EXPOSE 8080
+CMD ["python3", "-m", "http.server", "8080", "--bind", "0.0.0.0"]

@@ -1,0 +1,188 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta charset="UTF-8"/>
+<title>pacman.c — mod lab</title>
+<link rel="icon" type="image/png" href="favicon.png"/>
+<style type="text/css">
+html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background-color: black;
+    font-family: Arial, Helvetica, sans-serif;
+}
+.split-root {
+    display: flex;
+    flex-direction: row;
+    width: 100vw;
+    height: 100vh;
+}
+.pane {
+    box-sizing: border-box;
+    outline: none;
+    min-height: 0;
+    min-width: 0;
+}
+.pane-mod {
+    flex: 0 0 38%;
+    max-width: 520px;
+    min-width: 280px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    background: #14141e;
+    border-right: 1px solid #333;
+}
+body.focus-mod .pane-mod {
+    box-shadow: inset 0 0 0 3px #ffcc00;
+}
+.pane-game {
+    flex: 1;
+    position: relative;
+    background: #000;
+}
+body.focus-game .pane-game {
+    box-shadow: inset 0 0 0 3px #ffcc00;
+}
+.pane-mod h2 {
+    margin: 0;
+    color: #ffcc00;
+    font-size: 16px;
+    font-weight: bold;
+}
+.mod-hint {
+    margin: 0;
+    color: #aaa;
+    font-size: 11px;
+    line-height: 1.35;
+}
+.mod-editor-host {
+    flex: 1;
+    width: 100%;
+    min-height: 120px;
+    border: 1px solid #555;
+    border-radius: 4px;
+    overflow: hidden;
+    box-sizing: border-box;
+}
+.mod-actions {
+    flex-shrink: 0;
+}
+#btn-load {
+    width: 100%;
+    padding: 8px 12px;
+    font-size: 14px;
+    font-weight: bold;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    background: #2d8a3e;
+    color: white;
+    box-sizing: border-box;
+}
+#btn-load:disabled {
+    background: #333;
+    color: #888;
+    cursor: default;
+}
+.mod-error {
+    margin: 0;
+    color: #f88;
+    font-size: 11px;
+    display: none;
+    flex-shrink: 0;
+}
+.game {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    border: 0;
+    overflow: hidden;
+    display: block;
+    outline: none;
+    image-rendering: optimizeSpeed;
+    image-rendering: -moz-crisp-edges;
+    image-rendering: -o-crisp-edges;
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: optimize-contrast;
+    image-rendering: crisp-edges;
+    image-rendering: pixelated;
+    -ms-interpolation-mode: nearest-neighbor;
+}
+.game-title {
+    pointer-events: none;
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    z-index: 1;
+    color: white;
+    font-family: "Arial Black", Gadget, sans-serif;
+    font-size: 24px;
+}
+.game-menu-item {
+    pointer-events: auto;
+    font-size: 16px;
+    padding-left: 8px;
+    font-family: Arial, Helvetica, sans-serif;
+}
+.game-menu-link {
+    text-decoration: none;
+    color: white;
+}
+</style>
+</head>
+<body style="background:black">
+  <div class="split-root">
+    <div class="pane pane-mod" id="mod-panel">
+      <h2>Lua mod</h2>
+      <p class="mod-hint">Click this pane to edit. Click the game pane to play (arrows / WASD). <b>Load mod</b> applies and restarts.</p>
+      <div id="mod-editor" class="mod-editor-host"></div>
+      <p class="mod-error" id="mod-error"></p>
+      <div class="mod-actions">
+        <button type="button" id="btn-load">Load mod</button>
+      </div>
+    </div>
+    <div class="pane pane-game" id="game-pane">
+      <canvas class="game" id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
+      <div class="game-title">
+        <span class="game-menu-item"><a class="game-menu-link" href="https://github.com/floooh/pacman.c/blob/main/pacman.c" target="_blank">source code</a></span>
+      </div>
+    </div>
+  </div>
+  <script type="text/javascript">
+    var Module = {
+        print: (function() {
+            return function(text) {
+                text = Array.prototype.slice.call(arguments).join(" ");
+                console.log(text);
+            };
+        })(),
+        printErr: function(text) {
+            text = Array.prototype.slice.call(arguments).join(" ");
+            console.error(text);
+        },
+        canvas: (function() {
+            var canvas = document.getElementById("canvas");
+            canvas.addEventListener("webglcontextlost", function(e) {
+                alert("WebGL context lost, please reload the page");
+                e.preventDefault();
+            }, false);
+            return canvas;
+        })(),
+        setStatus: function(text) { },
+        monitorRunDependencies: function(left) { },
+    };
+    window.onerror = function(event) {
+        console.log("onerror: " + event.message);
+    };
+  </script>
+  <script type="text/javascript" src="monaco/vs/loader.js"></script>
+  <script type="text/javascript" src="mod_editor.js"></script>
+  <script type="text/javascript" src="mod_loader.js"></script>
+  {{{ SCRIPT }}}
+</body>
+</html>

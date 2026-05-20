@@ -1,0 +1,42 @@
+# Native Linux build (OpenGL + X11 + ALSA + Lua)
+# Build:  docker build -f docker/Dockerfile.native -t pacman-native .
+# Run:    docker run --rm -it -e DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix pacman-native
+
+FROM debian:bookworm-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake \
+    gcc \
+    pkg-config \
+    libgl-dev \
+    libx11-dev \
+    libxi-dev \
+    libxcursor-dev \
+    libxrandr-dev \
+    libasound2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build -j"$(nproc)"
+
+# Runtime image (smaller; same libs needed to run the binary)
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libx11-6 \
+    libxi6 \
+    libxcursor1 \
+    libxrandr2 \
+    libasound2 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=build /src/build/pacman /app/pacman
+COPY mods /app/mods
+
+ENTRYPOINT ["/app/pacman"]
+CMD []
