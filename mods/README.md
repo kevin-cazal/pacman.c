@@ -1,6 +1,6 @@
 # Pacman.c Lua mods
 
-Mods are Lua files that return a table with optional `pacman` and `ghosts` hooks. If a hook is missing or returns `nil`, the game uses the built-in C behavior.
+Mods are Lua files that return a table with optional `game`, `pacman`, and `ghosts` hooks. If a hook is missing or returns `nil`, the game uses the built-in C behavior.
 
 ## Run with a mod
 
@@ -23,6 +23,15 @@ python3 -m http.server -d build-wasm/
 
 Open `index.html` or `mod_lab.html`. GitHub Pages deploys the staged `site/` output via `.github/workflows/pages.yml`. To vendor Monaco only: `./scripts/vendor-monaco.sh`.
 
+## Maze helpers (globals)
+
+| Function | Description |
+|----------|-------------|
+| `can_move(pos, cornering?)` | `pos` is `{x,y,dir}` tile coords, or `can_move(tx, ty, dir, cornering?)` |
+| `tile_blocked(pos)` | `pos` is `{x,y}` or `tile_blocked(tx, ty)` |
+| `dist_sq(a, b)` | Squared tile distance between two `{x,y}` positions |
+| `log("message")` | Console log |
+
 ## Pacman hooks
 
 | Hook | Return | Description |
@@ -35,6 +44,20 @@ Context fields: `tick`, `round`, `freeze`, `dir`, `pos` `{x,y}` (tile), `input` 
 
 ## Ghost hooks (per ghost: `blinky`, `pinky`, `inky`, `clyde`)
 
+### Full AI takeover: `on_tick`
+
+When `on_tick` is defined for a ghost, **all other ghost hooks for that ghost are ignored**, and the built-in C state machine, target selection, and direction logic are skipped. Return a table each tick:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `dir` | yes | Movement direction this tick |
+| `speed` | yes | Pixels to move (0 = stay still) |
+| `state` | no | New ghost state name (see below) |
+| `target` | no | Tile target `{x,y}` (debug overlay) |
+| `reverse` | no | Reverse direction on scatter/chase change (default: auto) |
+
+### Partial overrides (only when `on_tick` is absent)
+
 | Hook | Return | Description |
 |------|--------|-------------|
 | `scatter_target` | `{x,y}` | Tile target in scatter mode |
@@ -43,16 +66,27 @@ Context fields: `tick`, `round`, `freeze`, `dir`, `pos` `{x,y}` (tile), `input` 
 | `speed` | integer | Pixels to move this tick |
 | `update_state` | state name | Override proposed state transition |
 | `choose_dir` | direction string | Override `next_dir` at intersections |
+| `on_collide_pacman` | `"eat_ghost"` / `"kill_pacman"` / `"ignore"` | Override collision outcome |
 
-Ghost context: `type`, `state`, `new_state`, `dir`, `next_dir`, `pos`, `target_pos`, `pacman_pos`, `frightened`, `eaten`, plus common tick/round/freeze.
+### Ghost context (`on_tick` and partial hooks)
+
+`type`, `state`, `new_state`, `dir`, `next_dir`, `pos` (tile), `pixel_pos`, `target_pos`, `scatter_target`, `pacman_pos`, `pacman_dir`, `frightened`, `eaten`, `at_tile_center`, `round_ticks`, `dot_counter`, `dot_limit`, `global_dot_counter`, `global_dot_active`, `fright_ticks`, `fright_remaining`, `ghosts` (table of all four ghosts with `type`, `state`, `pos`, `dir`).
 
 State names: `chase`, `scatter`, `frightened`, `eyes`, `house`, `leavehouse`, `enterhouse`, `none`.
 
-Use `log("message")` for console output.
+## Game hooks (`game` table)
+
+| Hook | Return | Description |
+|------|--------|-------------|
+| `on_dot_eaten` | table or `nil` | Override dot scoring and house counters. `nil` = vanilla. Table: `{ score = N, house = "default" \| "none" }` |
+| `on_pill_eaten` | table or `nil` | Override pill scoring and fright. `nil` = vanilla. Table: `{ score = N, frighten = "all" \| "none" \| { blinky = true, ... }, sound = bool, reset_ghost_eaten_count = bool }` |
+
+Context: `tick`, `round`, `pos`, `num_ghosts_eaten`, `ghosts` (snapshot of all four).
 
 ## Example mods
 
 - `default.lua` — empty hooks (vanilla)
 - `slow_pacman.lua` — slower movement cadence
-- `aggressive_blinky.lua` — Blinky chases Pacman's tile directly
+- `aggressive_blinky.lua` — Blinky chases Pacman's tile directly (partial hooks)
 - `random_clyde.lua` — Clyde uses a custom frightened wander pattern
+- `full_lua_ghosts.lua` — Blinky full `on_tick` AI with maze helpers; other ghosts frozen

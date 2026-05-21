@@ -751,9 +751,18 @@ sapp_desc sokol_main(int argc, char* argv[]) {
     };
 }
 
+static bool lua_mod_can_move_tile(int16_t tx, int16_t ty, lua_mod_dir_t dir, bool cornering);
+static bool lua_mod_is_blocking_tile(int16_t tx, int16_t ty);
+static int lua_mod_tile_distance_sq(int16_t x0, int16_t y0, int16_t x1, int16_t y1);
+
 static void init(void) {
     gfx_init();
     snd_init();
+    lua_mod_register_maze_api(&(lua_mod_maze_api_t) {
+        .can_move_tile = lua_mod_can_move_tile,
+        .is_blocking_tile = lua_mod_is_blocking_tile,
+        .tile_distance_sq = lua_mod_tile_distance_sq,
+    });
     lua_mod_init(g_argc, g_argv);
 
     // start into intro screen (or game if --skip-intro / DBG_SKIP_INTRO)
@@ -1265,6 +1274,32 @@ static lua_mod_i2_t lua_mod_tile_pos(int2_t p) {
     return (lua_mod_i2_t){ t.x, t.y };
 }
 
+static void lua_mod_fill_ghost_snapshots(lua_mod_ghost_snapshot_t* out) {
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        const ghost_t* g = &state.game.ghost[i];
+        out[i] = (lua_mod_ghost_snapshot_t) {
+            .type = (lua_mod_ghosttype_t)g->type,
+            .state = (lua_mod_ghoststate_t)g->state,
+            .pos = lua_mod_tile_pos(g->actor.pos),
+            .dir = (lua_mod_dir_t)g->actor.dir,
+        };
+    }
+}
+
+static lua_mod_game_ctx_t lua_mod_make_game_ctx(int2_t tile_pos) {
+    lua_mod_ghost_snapshot_t ghosts[LUA_MOD_GHOST_NUM];
+    lua_mod_fill_ghost_snapshots(ghosts);
+    return (lua_mod_game_ctx_t) {
+        .tick = state.timing.tick,
+        .round = state.game.round,
+        .pos = { tile_pos.x, tile_pos.y },
+        .num_ghosts_eaten = state.game.num_ghosts_eaten,
+        .ghosts = {
+            ghosts[0], ghosts[1], ghosts[2], ghosts[3],
+        },
+    };
+}
+
 static lua_mod_pacman_ctx_t lua_mod_make_pacman_ctx(void) {
     const actor_t* a = &state.game.pacman.actor;
     return (lua_mod_pacman_ctx_t) {
@@ -1283,6 +1318,18 @@ static lua_mod_pacman_ctx_t lua_mod_make_pacman_ctx(void) {
 }
 
 static lua_mod_ghost_ctx_t lua_mod_make_ghost_ctx(const ghost_t* ghost, ghoststate_t new_state) {
+    const int2_t dist_mid = dist_to_tile_mid(ghost->actor.pos);
+    const bool at_center = (dist_mid.x == 0) && (dist_mid.y == 0);
+    const levelspec_t spec = levelspec(state.game.round);
+    lua_mod_ghost_snapshot_t ghosts[LUA_MOD_GHOST_NUM];
+    lua_mod_fill_ghost_snapshots(ghosts);
+    uint32_t fright_remaining = 0;
+    if (ghost->frightened.tick != DISABLED_TICKS && state.timing.tick >= ghost->frightened.tick) {
+        const uint32_t elapsed = state.timing.tick - ghost->frightened.tick;
+        if (elapsed < spec.fright_ticks) {
+            fright_remaining = spec.fright_ticks - elapsed;
+        }
+    }
     return (lua_mod_ghost_ctx_t) {
         .tick = state.timing.tick,
         .round = state.game.round,
@@ -1293,11 +1340,95 @@ static lua_mod_ghost_ctx_t lua_mod_make_ghost_ctx(const ghost_t* ghost, ghoststa
         .dir = (lua_mod_dir_t)ghost->actor.dir,
         .next_dir = (lua_mod_dir_t)ghost->next_dir,
         .pos = lua_mod_tile_pos(ghost->actor.pos),
+        .pixel_pos = { ghost->actor.pos.x, ghost->actor.pos.y },
         .target_pos = { ghost->target_pos.x, ghost->target_pos.y },
+        .scatter_target = {
+            ghost_scatter_targets[ghost->type].x,
+            ghost_scatter_targets[ghost->type].y,
+        },
         .pacman_pos = lua_mod_tile_pos(state.game.pacman.actor.pos),
-        .frightened = now(ghost->frightened),
+        .pacman_dir = (lua_mod_dir_t)state.game.pacman.actor.dir,
+        .frightened = before(ghost->frightened, spec.fright_ticks),
         .eaten = now(ghost->eaten),
+        .at_tile_center = at_center,
+        .round_ticks = since(state.game.round_started),
+        .dot_counter = ghost->dot_counter,
+        .dot_limit = ghost->dot_limit,
+        .global_dot_counter = state.game.global_dot_counter,
+        .global_dot_active = state.game.global_dot_counter_active,
+        .fright_ticks = spec.fright_ticks,
+        .fright_remaining = fright_remaining,
+        .ghosts = {
+            ghosts[0], ghosts[1], ghosts[2], ghosts[3],
+        },
     };
+}
+
+static dir_t reverse_dir(dir_t dir);
+
+static void game_apply_ghost_state_transition(ghost_t* ghost, ghoststate_t new_state, bool reverse) {
+    if (new_state == ghost->state) {
+        return;
+    }
+    switch (ghost->state) {
+        case GHOSTSTATE_LEAVEHOUSE:
+            ghost->next_dir = ghost->actor.dir = DIR_LEFT;
+            break;
+        case GHOSTSTATE_ENTERHOUSE:
+            disable(&ghost->frightened);
+            break;
+        case GHOSTSTATE_FRIGHTENED:
+            break;
+        case GHOSTSTATE_SCATTER:
+        case GHOSTSTATE_CHASE:
+            if (reverse) {
+                ghost->next_dir = reverse_dir(ghost->actor.dir);
+            }
+            break;
+        default:
+            break;
+    }
+    ghost->state = new_state;
+}
+
+static void game_apply_lua_ghost_tick(ghost_t* ghost, const lua_mod_ghost_tick_result_t* tr) {
+    if (tr->has_state) {
+        const bool reverse = tr->has_reverse ? tr->reverse :
+            ((ghost->state == GHOSTSTATE_SCATTER || ghost->state == GHOSTSTATE_CHASE) &&
+             (tr->state == LUA_MOD_GHOSTSTATE_SCATTER || tr->state == LUA_MOD_GHOSTSTATE_CHASE));
+        game_apply_ghost_state_transition(ghost, (ghoststate_t)tr->state, reverse);
+    }
+    if (tr->has_dir) {
+        ghost->actor.dir = (dir_t)tr->dir;
+        ghost->next_dir = (dir_t)tr->dir;
+    }
+    if (tr->has_target) {
+        ghost->target_pos = i2(tr->target.x, tr->target.y);
+    }
+}
+
+static void game_collide_eat_ghost(ghost_t* ghost) {
+    ghost->state = GHOSTSTATE_EYES;
+    start(&ghost->eaten);
+    start(&state.game.ghost_eaten);
+    state.game.num_ghosts_eaten++;
+    state.game.score += 10 * (1 << state.game.num_ghosts_eaten);
+    state.game.freeze |= FREEZETYPE_EAT_GHOST;
+    snd_start(2, &snd_eatghost);
+}
+
+static void game_collide_kill_pacman(void) {
+    #if !DBG_GODMODE
+    snd_clear();
+    start(&state.game.pacman_eaten);
+    state.game.freeze |= FREEZETYPE_DEAD;
+    if (state.game.num_lives > 0) {
+        start_after(&state.game.ready_started, PACMAN_EATEN_TICKS+PACMAN_DEATH_TICKS);
+    }
+    else {
+        start_after(&state.game.game_over, PACMAN_EATEN_TICKS+PACMAN_DEATH_TICKS);
+    }
+    #endif
 }
 
 // clamp tile pos to valid playfield coords
@@ -1397,6 +1528,19 @@ static bool can_move(int2_t pos, dir_t wanted_dir, bool allow_cornering) {
         // way is free
         return true;
     }
+}
+
+static bool lua_mod_can_move_tile(int16_t tx, int16_t ty, lua_mod_dir_t dir, bool cornering) {
+    const int2_t pix = i2(tx * TILE_WIDTH + TILE_WIDTH / 2, ty * TILE_HEIGHT + TILE_HEIGHT / 2);
+    return can_move(pix, (dir_t)dir, cornering);
+}
+
+static bool lua_mod_is_blocking_tile(int16_t tx, int16_t ty) {
+    return is_blocking_tile(i2(tx, ty));
+}
+
+static int lua_mod_tile_distance_sq(int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
+    return squared_distance_i2(i2(x0, y0), i2(x1, y1));
 }
 
 // compute a new pixel position along a direction (without blocking check!)
@@ -2273,22 +2417,68 @@ static void game_update_actors(void) {
         const int2_t tile_pos = pixel_to_tile_pos(actor->pos);
         if (is_dot(tile_pos)) {
             vid_tile(tile_pos, TILE_SPACE);
-            state.game.score += 1;
             start(&state.game.dot_eaten);
-            start(&state.game.force_leave_house);
+            bool dot_handled = false;
+            if (lua_mod_active()) {
+                lua_mod_dot_result_t dr;
+                lua_mod_game_ctx_t gctx = lua_mod_make_game_ctx(tile_pos);
+                if (lua_mod_game_on_dot_eaten(&gctx, &dr)) {
+                    dot_handled = true;
+                    state.game.score += dr.score;
+                    if (dr.force_leave_house) {
+                        start(&state.game.force_leave_house);
+                    }
+                    if (dr.update_house) {
+                        game_update_ghosthouse_dot_counters();
+                    }
+                }
+            }
+            if (!dot_handled) {
+                state.game.score += 1;
+                start(&state.game.force_leave_house);
+                game_update_ghosthouse_dot_counters();
+            }
             game_update_dots_eaten();
-            game_update_ghosthouse_dot_counters();
         }
         if (is_pill(tile_pos)) {
             vid_tile(tile_pos, TILE_SPACE);
-            state.game.score += 5;
             game_update_dots_eaten();
             start(&state.game.pill_eaten);
-            state.game.num_ghosts_eaten = 0;
-            for (int i = 0; i < NUM_GHOSTS; i++) {
-                start(&state.game.ghost[i].frightened);
+            bool pill_handled = false;
+            if (lua_mod_active()) {
+                lua_mod_pill_result_t pr;
+                lua_mod_game_ctx_t gctx = lua_mod_make_game_ctx(tile_pos);
+                gctx.num_ghosts_eaten = state.game.num_ghosts_eaten;
+                if (lua_mod_game_on_pill_eaten(&gctx, &pr)) {
+                    pill_handled = true;
+                    state.game.score += pr.score;
+                    if (pr.reset_ghost_eaten_count) {
+                        state.game.num_ghosts_eaten = 0;
+                    }
+                    if (!pr.frighten_none) {
+                        for (int gi = 0; gi < NUM_GHOSTS; gi++) {
+                            bool frighten = pr.frighten_all;
+                            if (pr.has_frighten_ghost[gi]) {
+                                frighten = pr.frighten_ghost[gi];
+                            }
+                            if (frighten) {
+                                start(&state.game.ghost[gi].frightened);
+                            }
+                        }
+                    }
+                    if (pr.play_sound) {
+                        snd_start(1, &snd_frightened);
+                    }
+                }
             }
-            snd_start(1, &snd_frightened);
+            if (!pill_handled) {
+                state.game.score += 5;
+                state.game.num_ghosts_eaten = 0;
+                for (int i = 0; i < NUM_GHOSTS; i++) {
+                    start(&state.game.ghost[i].frightened);
+                }
+                snd_start(1, &snd_frightened);
+            }
         }
         // check if Pacman eats the bonus fruit
         if (state.game.active_fruit != FRUIT_NONE) {
@@ -2307,31 +2497,24 @@ static void game_update_actors(void) {
             ghost_t* ghost = &state.game.ghost[i];
             const int2_t ghost_tile_pos = pixel_to_tile_pos(ghost->actor.pos);
             if (equal_i2(tile_pos, ghost_tile_pos)) {
-                if (ghost->state == GHOSTSTATE_FRIGHTENED) {
-                    // Pacman eats a frightened ghost
-                    ghost->state = GHOSTSTATE_EYES;
-                    start(&ghost->eaten);
-                    start(&state.game.ghost_eaten);
-                    state.game.num_ghosts_eaten++;
-                    // increase score by 20, 40, 80, 160
-                    state.game.score += 10 * (1<<state.game.num_ghosts_eaten);
-                    state.game.freeze |= FREEZETYPE_EAT_GHOST;
-                    snd_start(2, &snd_eatghost);
+                lua_mod_collide_action_t action = LUA_MOD_COLLIDE_DEFAULT;
+                if (lua_mod_active()) {
+                    lua_mod_ghost_ctx_t ctx = lua_mod_make_ghost_ctx(ghost, ghost->state);
+                    lua_mod_ghost_on_collide_pacman(&ctx, &action);
                 }
-                else if ((ghost->state == GHOSTSTATE_CHASE) || (ghost->state == GHOSTSTATE_SCATTER)) {
-                    // otherwise, ghost eats Pacman, Pacman loses a life
-                    #if !DBG_GODMODE
-                    snd_clear();
-                    start(&state.game.pacman_eaten);
-                    state.game.freeze |= FREEZETYPE_DEAD;
-                    // if Pacman has any lives left start a new round, otherwise start the game-over sequence
-                    if (state.game.num_lives > 0) {
-                        start_after(&state.game.ready_started, PACMAN_EATEN_TICKS+PACMAN_DEATH_TICKS);
+                if (action == LUA_MOD_COLLIDE_DEFAULT) {
+                    if (ghost->state == GHOSTSTATE_FRIGHTENED) {
+                        game_collide_eat_ghost(ghost);
                     }
-                    else {
-                        start_after(&state.game.game_over, PACMAN_EATEN_TICKS+PACMAN_DEATH_TICKS);
+                    else if ((ghost->state == GHOSTSTATE_CHASE) || (ghost->state == GHOSTSTATE_SCATTER)) {
+                        game_collide_kill_pacman();
                     }
-                    #endif
+                }
+                else if (action == LUA_MOD_COLLIDE_EAT_GHOST) {
+                    game_collide_eat_ghost(ghost);
+                }
+                else if (action == LUA_MOD_COLLIDE_KILL_PACMAN) {
+                    game_collide_kill_pacman();
                 }
             }
         }
@@ -2340,19 +2523,38 @@ static void game_update_actors(void) {
     // Ghost "AIs"
     for (int ghost_index = 0; ghost_index < NUM_GHOSTS; ghost_index++) {
         ghost_t* ghost = &state.game.ghost[ghost_index];
-        // handle ghost-state transitions
-        game_update_ghost_state(ghost);
-        // update the ghost's target position
-        game_update_ghost_target(ghost);
-        // finally, move the ghost towards the current target position
-        const int num_move_ticks = game_ghost_speed(ghost);
-        for (int i = 0; i < num_move_ticks; i++) {
-            bool force_move = game_update_ghost_dir(ghost);
-            actor_t* actor = &ghost->actor;
-            const bool allow_cornering = false;
-            if (force_move || can_move(actor->pos, actor->dir, allow_cornering)) {
-                actor->pos = move(actor->pos, actor->dir, allow_cornering);
-                actor->anim_tick++;
+        int num_move_ticks;
+        if (lua_mod_active() && lua_mod_ghost_has_on_tick((lua_mod_ghosttype_t)ghost->type)) {
+            lua_mod_ghost_tick_result_t tr;
+            lua_mod_ghost_ctx_t ctx = lua_mod_make_ghost_ctx(ghost, ghost->state);
+            if (lua_mod_ghost_on_tick(&ctx, &tr)) {
+                game_apply_lua_ghost_tick(ghost, &tr);
+                num_move_ticks = tr.speed;
+            }
+            else {
+                num_move_ticks = game_ghost_speed(ghost);
+            }
+            for (int i = 0; i < num_move_ticks; i++) {
+                actor_t* actor = &ghost->actor;
+                const bool allow_cornering = false;
+                if (can_move(actor->pos, actor->dir, allow_cornering)) {
+                    actor->pos = move(actor->pos, actor->dir, allow_cornering);
+                    actor->anim_tick++;
+                }
+            }
+        }
+        else {
+            game_update_ghost_state(ghost);
+            game_update_ghost_target(ghost);
+            num_move_ticks = game_ghost_speed(ghost);
+            for (int i = 0; i < num_move_ticks; i++) {
+                bool force_move = game_update_ghost_dir(ghost);
+                actor_t* actor = &ghost->actor;
+                const bool allow_cornering = false;
+                if (force_move || can_move(actor->pos, actor->dir, allow_cornering)) {
+                    actor->pos = move(actor->pos, actor->dir, allow_cornering);
+                    actor->anim_tick++;
+                }
             }
         }
     }

@@ -32,16 +32,37 @@ typedef struct {
     int frightened_target;
     int speed;
     int choose_dir;
+    int on_tick;
+    int on_collide_pacman;
 } ghost_hooks_t;
+
+typedef struct {
+    int on_dot_eaten;
+    int on_pill_eaten;
+} game_hooks_t;
 
 static struct {
     lua_State* L;
     bool loaded;
     pacman_hooks_t pacman;
     ghost_hooks_t ghosts[LUA_MOD_GHOST_NUM];
+    game_hooks_t game;
 } mod;
 
+static lua_mod_maze_api_t maze_api;
+static bool maze_api_set;
+
 #define HOOK_NONE LUA_NOREF
+
+void lua_mod_register_maze_api(const lua_mod_maze_api_t* api) {
+    if (api) {
+        maze_api = *api;
+        maze_api_set = true;
+    } else {
+        memset(&maze_api, 0, sizeof(maze_api));
+        maze_api_set = false;
+    }
+}
 
 static void unref_hook(int* ref) {
     if (mod.L && *ref != HOOK_NONE) {
@@ -68,6 +89,111 @@ static int l_log(lua_State* L) {
     const char* msg = luaL_checkstring(L, 1);
     log_msg(3, msg);
     return 0;
+}
+
+static const char* dir_name(lua_mod_dir_t d);
+static bool dir_from_lua(lua_State* L, int idx, lua_mod_dir_t* out);
+static bool read_i2(lua_State* L, int idx, lua_mod_i2_t* out);
+static const char* ghoststate_name(lua_mod_ghoststate_t s);
+static const char* ghost_type_name(lua_mod_ghosttype_t t);
+
+static bool read_pos_dir(lua_State* L, int idx, int16_t* tx, int16_t* ty, lua_mod_dir_t* dir) {
+    idx = lua_absindex(L, idx);
+    if (!lua_istable(L, idx)) {
+        return false;
+    }
+    lua_getfield(L, idx, "x");
+    lua_getfield(L, idx, "y");
+    if (!lua_isnumber(L, -2) || !lua_isnumber(L, -1)) {
+        lua_pop(L, 2);
+        return false;
+    }
+    *tx = (int16_t)lua_tointeger(L, -2);
+    *ty = (int16_t)lua_tointeger(L, -1);
+    lua_pop(L, 2);
+    lua_getfield(L, idx, "dir");
+    if (!lua_isstring(L, -1)) {
+        lua_pop(L, 1);
+        return false;
+    }
+    if (!dir_from_lua(L, -1, dir)) {
+        lua_pop(L, 1);
+        return false;
+    }
+    lua_pop(L, 1);
+    return true;
+}
+
+static int l_can_move(lua_State* L) {
+    if (!maze_api_set || !maze_api.can_move_tile) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    int16_t tx, ty;
+    lua_mod_dir_t dir;
+    bool cornering = false;
+    if (lua_gettop(L) >= 2 && lua_istable(L, 1)) {
+        if (!read_pos_dir(L, 1, &tx, &ty, &dir)) {
+            return luaL_error(L, "can_move: expected {x,y,dir}");
+        }
+        if (lua_gettop(L) >= 2) {
+            cornering = lua_toboolean(L, 2);
+        }
+    } else {
+        tx = (int16_t)luaL_checkinteger(L, 1);
+        ty = (int16_t)luaL_checkinteger(L, 2);
+        if (!dir_from_lua(L, 3, &dir)) {
+            return luaL_error(L, "can_move: invalid direction");
+        }
+        if (lua_gettop(L) >= 4) {
+            cornering = lua_toboolean(L, 4);
+        }
+    }
+    lua_pushboolean(L, maze_api.can_move_tile(tx, ty, dir, cornering));
+    return 1;
+}
+
+static int l_tile_blocked(lua_State* L) {
+    if (!maze_api_set || !maze_api.is_blocking_tile) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    int16_t tx, ty;
+    if (lua_istable(L, 1)) {
+        lua_mod_i2_t p;
+        if (!read_i2(L, 1, &p)) {
+            return luaL_error(L, "tile_blocked: expected {x,y}");
+        }
+        tx = p.x;
+        ty = p.y;
+    } else {
+        tx = (int16_t)luaL_checkinteger(L, 1);
+        ty = (int16_t)luaL_checkinteger(L, 2);
+    }
+    lua_pushboolean(L, maze_api.is_blocking_tile(tx, ty));
+    return 1;
+}
+
+static int l_dist_sq(lua_State* L) {
+    if (!maze_api_set || !maze_api.tile_distance_sq) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    lua_mod_i2_t a, b;
+    if (!read_i2(L, 1, &a) || !read_i2(L, 2, &b)) {
+        return luaL_error(L, "dist_sq: expected two {x,y} tables");
+    }
+    lua_pushinteger(L, maze_api.tile_distance_sq(a.x, a.y, b.x, b.y));
+    return 1;
+}
+
+static void register_maze_globals(lua_State* L) {
+    lua_pushcfunction(L, l_can_move);
+    lua_setglobal(L, "can_move");
+    lua_pushcfunction(L, l_tile_blocked);
+    lua_setglobal(L, "tile_blocked");
+    lua_pushcfunction(L, l_dist_sq);
+    lua_setglobal(L, "dist_sq");
 }
 
 static const char* dir_name(lua_mod_dir_t d) {
@@ -162,6 +288,37 @@ static void push_input(lua_State* L, const lua_mod_pacman_ctx_t* ctx) {
     lua_setfield(L, -2, "right");
 }
 
+static void push_ghost_snapshot(lua_State* L, const lua_mod_ghost_snapshot_t* g) {
+    lua_createtable(L, 0, 4);
+    lua_pushstring(L, ghost_type_name(g->type));
+    lua_setfield(L, -2, "type");
+    lua_pushstring(L, ghoststate_name(g->state));
+    lua_setfield(L, -2, "state");
+    push_i2(L, g->pos);
+    lua_setfield(L, -2, "pos");
+    lua_pushstring(L, dir_name(g->dir));
+    lua_setfield(L, -2, "dir");
+}
+
+static void push_ghosts_table(lua_State* L, const lua_mod_ghost_snapshot_t* ghosts) {
+    static const char* names[LUA_MOD_GHOST_NUM] = { "blinky", "pinky", "inky", "clyde" };
+    lua_createtable(L, 0, LUA_MOD_GHOST_NUM);
+    for (int i = 0; i < LUA_MOD_GHOST_NUM; i++) {
+        push_ghost_snapshot(L, &ghosts[i]);
+        lua_setfield(L, -2, names[i]);
+    }
+}
+
+static const char* ghost_type_name(lua_mod_ghosttype_t t) {
+    switch (t) {
+        case LUA_MOD_GHOST_BLINKY: return "blinky";
+        case LUA_MOD_GHOST_PINKY:  return "pinky";
+        case LUA_MOD_GHOST_INKY:   return "inky";
+        case LUA_MOD_GHOST_CLYDE:  return "clyde";
+        default: return "blinky";
+    }
+}
+
 static void push_pacman_ctx(lua_State* L, const lua_mod_pacman_ctx_t* ctx) {
     lua_createtable(L, 0, 10);
     lua_pushinteger(L, (lua_Integer)ctx->tick);
@@ -182,18 +339,8 @@ static void push_pacman_ctx(lua_State* L, const lua_mod_pacman_ctx_t* ctx) {
     lua_setfield(L, -2, "pill_eaten");
 }
 
-static const char* ghost_type_name(lua_mod_ghosttype_t t) {
-    switch (t) {
-        case LUA_MOD_GHOST_BLINKY: return "blinky";
-        case LUA_MOD_GHOST_PINKY:  return "pinky";
-        case LUA_MOD_GHOST_INKY:   return "inky";
-        case LUA_MOD_GHOST_CLYDE:  return "clyde";
-        default: return "blinky";
-    }
-}
-
 static void push_ghost_ctx(lua_State* L, const lua_mod_ghost_ctx_t* ctx) {
-    lua_createtable(L, 0, 14);
+    lua_createtable(L, 0, 24);
     lua_pushinteger(L, (lua_Integer)ctx->tick);
     lua_setfield(L, -2, "tick");
     lua_pushinteger(L, ctx->round);
@@ -212,14 +359,52 @@ static void push_ghost_ctx(lua_State* L, const lua_mod_ghost_ctx_t* ctx) {
     lua_setfield(L, -2, "next_dir");
     push_i2(L, ctx->pos);
     lua_setfield(L, -2, "pos");
+    push_i2(L, ctx->pixel_pos);
+    lua_setfield(L, -2, "pixel_pos");
     push_i2(L, ctx->target_pos);
     lua_setfield(L, -2, "target_pos");
+    push_i2(L, ctx->scatter_target);
+    lua_setfield(L, -2, "scatter_target");
     push_i2(L, ctx->pacman_pos);
     lua_setfield(L, -2, "pacman_pos");
+    lua_pushstring(L, dir_name(ctx->pacman_dir));
+    lua_setfield(L, -2, "pacman_dir");
     lua_pushboolean(L, ctx->frightened);
     lua_setfield(L, -2, "frightened");
     lua_pushboolean(L, ctx->eaten);
     lua_setfield(L, -2, "eaten");
+    lua_pushboolean(L, ctx->at_tile_center);
+    lua_setfield(L, -2, "at_tile_center");
+    lua_pushinteger(L, (lua_Integer)ctx->round_ticks);
+    lua_setfield(L, -2, "round_ticks");
+    lua_pushinteger(L, ctx->dot_counter);
+    lua_setfield(L, -2, "dot_counter");
+    lua_pushinteger(L, ctx->dot_limit);
+    lua_setfield(L, -2, "dot_limit");
+    lua_pushinteger(L, ctx->global_dot_counter);
+    lua_setfield(L, -2, "global_dot_counter");
+    lua_pushboolean(L, ctx->global_dot_active);
+    lua_setfield(L, -2, "global_dot_active");
+    lua_pushinteger(L, ctx->fright_ticks);
+    lua_setfield(L, -2, "fright_ticks");
+    lua_pushinteger(L, (lua_Integer)ctx->fright_remaining);
+    lua_setfield(L, -2, "fright_remaining");
+    push_ghosts_table(L, ctx->ghosts);
+    lua_setfield(L, -2, "ghosts");
+}
+
+static void push_game_ctx(lua_State* L, const lua_mod_game_ctx_t* ctx) {
+    lua_createtable(L, 0, 6);
+    lua_pushinteger(L, (lua_Integer)ctx->tick);
+    lua_setfield(L, -2, "tick");
+    lua_pushinteger(L, ctx->round);
+    lua_setfield(L, -2, "round");
+    push_i2(L, ctx->pos);
+    lua_setfield(L, -2, "pos");
+    lua_pushinteger(L, ctx->num_ghosts_eaten);
+    lua_setfield(L, -2, "num_ghosts_eaten");
+    push_ghosts_table(L, ctx->ghosts);
+    lua_setfield(L, -2, "ghosts");
 }
 
 static int store_hook(lua_State* L, int fn_index) {
@@ -233,6 +418,7 @@ static void load_ghost_hooks(lua_State* L, int ghosts_table) {
         ghost_hooks_t* h = &mod.ghosts[i];
         h->update_state = h->scatter_target = h->chase_target = HOOK_NONE;
         h->frightened_target = h->speed = h->choose_dir = HOOK_NONE;
+        h->on_tick = h->on_collide_pacman = HOOK_NONE;
 
         lua_getfield(L, ghosts_table, names[i]);
         if (!lua_istable(L, -1)) {
@@ -263,6 +449,14 @@ static void load_ghost_hooks(lua_State* L, int ghosts_table) {
 
         lua_getfield(L, gt, "choose_dir");
         if (lua_isfunction(L, -1)) h->choose_dir = store_hook(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, gt, "on_tick");
+        if (lua_isfunction(L, -1)) h->on_tick = store_hook(L, -1);
+        lua_pop(L, 1);
+
+        lua_getfield(L, gt, "on_collide_pacman");
+        if (lua_isfunction(L, -1)) h->on_collide_pacman = store_hook(L, -1);
         lua_pop(L, 1);
 
         lua_pop(L, 1);
@@ -381,10 +575,165 @@ static bool run_hook_i2(int ref, void (*push_ctx)(lua_State*, const void*), cons
     return true;
 }
 
+static bool parse_ghost_tick_result(lua_State* L, int idx, lua_mod_ghost_tick_result_t* out) {
+    memset(out, 0, sizeof(*out));
+    if (!lua_istable(L, idx)) {
+        return false;
+    }
+    out->ok = true;
+
+    lua_getfield(L, idx, "state");
+    if (lua_isstring(L, -1) && ghoststate_from_lua(L, -1, &out->state)) {
+        out->has_state = true;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, idx, "dir");
+    if (lua_isstring(L, -1) && dir_from_lua(L, -1, &out->dir)) {
+        out->has_dir = true;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, idx, "speed");
+    if (lua_isnumber(L, -1)) {
+        out->has_speed = true;
+        out->speed = (int)lua_tointeger(L, -1);
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, idx, "target");
+    if (read_i2(L, -1, &out->target)) {
+        out->has_target = true;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, idx, "reverse");
+    if (lua_isboolean(L, -1)) {
+        out->has_reverse = true;
+        out->reverse = lua_toboolean(L, -1);
+    }
+    lua_pop(L, 1);
+
+    return out->has_dir && out->has_speed;
+}
+
+static bool parse_dot_result(lua_State* L, int idx, lua_mod_dot_result_t* out) {
+    memset(out, 0, sizeof(*out));
+    out->use_default = false;
+    out->score = 1;
+    out->update_house = true;
+    out->force_leave_house = true;
+
+    if (!lua_istable(L, idx)) {
+        return true;
+    }
+
+    lua_getfield(L, idx, "score");
+    if (lua_isnumber(L, -1)) {
+        out->score = (int)lua_tointeger(L, -1);
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, idx, "house");
+    if (lua_isstring(L, -1)) {
+        const char* s = lua_tostring(L, -1);
+        if (strcmp(s, "none") == 0) {
+            out->update_house = false;
+            out->force_leave_house = false;
+        } else if (strcmp(s, "default") == 0) {
+            out->update_house = true;
+            out->force_leave_house = true;
+        }
+    }
+    lua_pop(L, 1);
+
+    return true;
+}
+
+static bool parse_pill_result(lua_State* L, int idx, lua_mod_pill_result_t* out) {
+    memset(out, 0, sizeof(*out));
+    out->use_default = false;
+    out->score = 5;
+    out->frighten_all = true;
+    out->reset_ghost_eaten_count = true;
+    out->play_sound = true;
+
+    if (!lua_istable(L, idx)) {
+        return true;
+    }
+
+    lua_getfield(L, idx, "score");
+    if (lua_isnumber(L, -1)) {
+        out->score = (int)lua_tointeger(L, -1);
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, idx, "reset_ghost_eaten_count");
+    if (lua_isboolean(L, -1)) {
+        out->reset_ghost_eaten_count = lua_toboolean(L, -1);
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, idx, "sound");
+    if (lua_isboolean(L, -1)) {
+        out->play_sound = lua_toboolean(L, -1);
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, idx, "frighten");
+    if (lua_isstring(L, -1)) {
+        const char* s = lua_tostring(L, -1);
+        if (strcmp(s, "all") == 0) {
+            out->frighten_all = true;
+            out->frighten_none = false;
+        } else if (strcmp(s, "none") == 0) {
+            out->frighten_all = false;
+            out->frighten_none = true;
+        }
+    } else if (lua_istable(L, -1)) {
+        out->frighten_all = false;
+        out->frighten_none = false;
+        static const char* names[LUA_MOD_GHOST_NUM] = { "blinky", "pinky", "inky", "clyde" };
+        for (int i = 0; i < LUA_MOD_GHOST_NUM; i++) {
+            lua_getfield(L, -1, names[i]);
+            if (lua_isboolean(L, -1)) {
+                out->has_frighten_ghost[i] = true;
+                out->frighten_ghost[i] = lua_toboolean(L, -1);
+            }
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+
+    return true;
+}
+
+static bool parse_collide_action(lua_State* L, int idx, lua_mod_collide_action_t* out) {
+    if (!lua_isstring(L, idx)) {
+        return false;
+    }
+    const char* s = lua_tostring(L, idx);
+    if (strcmp(s, "eat_ghost") == 0) {
+        *out = LUA_MOD_COLLIDE_EAT_GHOST;
+        return true;
+    }
+    if (strcmp(s, "kill_pacman") == 0) {
+        *out = LUA_MOD_COLLIDE_KILL_PACMAN;
+        return true;
+    }
+    if (strcmp(s, "ignore") == 0) {
+        *out = LUA_MOD_COLLIDE_IGNORE;
+        return true;
+    }
+    return false;
+}
+
 static void clear_hooks(void) {
     unref_hook(&mod.pacman.should_move);
     unref_hook(&mod.pacman.wanted_dir);
     unref_hook(&mod.pacman.on_tick);
+    unref_hook(&mod.game.on_dot_eaten);
+    unref_hook(&mod.game.on_pill_eaten);
     for (int i = 0; i < LUA_MOD_GHOST_NUM; i++) {
         unref_hook(&mod.ghosts[i].update_state);
         unref_hook(&mod.ghosts[i].scatter_target);
@@ -392,6 +741,8 @@ static void clear_hooks(void) {
         unref_hook(&mod.ghosts[i].frightened_target);
         unref_hook(&mod.ghosts[i].speed);
         unref_hook(&mod.ghosts[i].choose_dir);
+        unref_hook(&mod.ghosts[i].on_tick);
+        unref_hook(&mod.ghosts[i].on_collide_pacman);
     }
 }
 
@@ -418,6 +769,20 @@ static bool parse_mod_table(lua_State* L, int idx) {
     lua_pop(L, 1);
 
     clear_hooks();
+
+    lua_getfield(L, idx, "game");
+    if (lua_istable(L, -1)) {
+        int gt = lua_gettop(L);
+        lua_getfield(L, gt, "on_dot_eaten");
+        if (lua_isfunction(L, -1)) mod.game.on_dot_eaten = store_hook(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, gt, "on_pill_eaten");
+        if (lua_isfunction(L, -1)) mod.game.on_pill_eaten = store_hook(L, -1);
+        lua_pop(L, 1);
+        lua_pop(L, 1);
+    } else {
+        lua_pop(L, 1);
+    }
 
     lua_getfield(L, idx, "pacman");
     if (lua_istable(L, -1)) {
@@ -463,6 +828,7 @@ static bool load_mod_source(const char* path, const char* src, size_t src_len) {
     luaL_openlibs(mod.L);
     lua_pushcfunction(mod.L, l_log);
     lua_setglobal(mod.L, "log");
+    register_maze_globals(mod.L);
 
     int status;
     if (path) {
@@ -519,6 +885,7 @@ bool lua_mod_load_buffer(const char* src, size_t len) {
 bool lua_mod_init(int argc, char** argv) {
     memset(&mod, 0, sizeof(mod));
     mod.pacman.should_move = mod.pacman.wanted_dir = mod.pacman.on_tick = HOOK_NONE;
+    mod.game.on_dot_eaten = mod.game.on_pill_eaten = HOOK_NONE;
     for (int i = 0; i < LUA_MOD_GHOST_NUM; i++) {
         mod.ghosts[i].update_state = HOOK_NONE;
     }
@@ -586,22 +953,47 @@ static ghost_hooks_t* ghost_hooks_for(lua_mod_ghosttype_t type) {
     return &mod.ghosts[type];
 }
 
-bool lua_mod_ghost_speed(const lua_mod_ghost_ctx_t* ctx, int c_default, int* out) {
-    (void)c_default;
+bool lua_mod_ghost_has_on_tick(lua_mod_ghosttype_t type) {
+    ghost_hooks_t* h = ghost_hooks_for(type);
+    return h && h->on_tick != HOOK_NONE;
+}
+
+bool lua_mod_ghost_on_tick(const lua_mod_ghost_ctx_t* ctx, lua_mod_ghost_tick_result_t* out) {
     ghost_hooks_t* h = ghost_hooks_for(ctx->type);
-    if (!h) {
+    if (!h || h->on_tick == HOOK_NONE) {
         return false;
     }
+    lua_rawgeti(mod.L, LUA_REGISTRYINDEX, h->on_tick);
+    push_ghost_ctx(mod.L, ctx);
+    if (lua_pcall(mod.L, 1, 1, 0) != LUA_OK) {
+        log_lua_error("ghost.on_tick");
+        return false;
+    }
+    if (lua_isnil(mod.L, -1)) {
+        lua_pop(mod.L, 1);
+        return false;
+    }
+    bool ok = parse_ghost_tick_result(mod.L, -1, out);
+    lua_pop(mod.L, 1);
+    return ok;
+}
+
+bool lua_mod_ghost_speed(const lua_mod_ghost_ctx_t* ctx, int c_default, int* out) {
+    ghost_hooks_t* h = ghost_hooks_for(ctx->type);
+    if (!h || h->on_tick != HOOK_NONE) {
+        return false;
+    }
+    (void)c_default;
     return run_hook_int(h->speed,
         (void (*)(lua_State*, const void*))push_ghost_ctx, ctx, out);
 }
 
 bool lua_mod_ghost_target(const lua_mod_ghost_ctx_t* ctx, lua_mod_i2_t c_default, lua_mod_i2_t* out) {
-    (void)c_default;
     ghost_hooks_t* h = ghost_hooks_for(ctx->type);
-    if (!h) {
+    if (!h || h->on_tick != HOOK_NONE) {
         return false;
     }
+    (void)c_default;
     int ref = HOOK_NONE;
     switch (ctx->state) {
         case LUA_MOD_GHOSTSTATE_SCATTER:    ref = h->scatter_target; break;
@@ -614,23 +1006,81 @@ bool lua_mod_ghost_target(const lua_mod_ghost_ctx_t* ctx, lua_mod_i2_t c_default
 }
 
 bool lua_mod_ghost_update_state(const lua_mod_ghost_ctx_t* ctx, lua_mod_ghoststate_t c_default, lua_mod_ghoststate_t* out) {
-    (void)c_default;
     ghost_hooks_t* h = ghost_hooks_for(ctx->type);
-    if (!h) {
+    if (!h || h->on_tick != HOOK_NONE) {
         return false;
     }
+    (void)c_default;
     return run_hook_ghoststate(h->update_state,
         (void (*)(lua_State*, const void*))push_ghost_ctx, ctx, out);
 }
 
 bool lua_mod_ghost_choose_dir(const lua_mod_ghost_ctx_t* ctx, lua_mod_dir_t c_default, lua_mod_dir_t* out) {
-    (void)c_default;
     ghost_hooks_t* h = ghost_hooks_for(ctx->type);
-    if (!h) {
+    if (!h || h->on_tick != HOOK_NONE) {
         return false;
     }
+    (void)c_default;
     return run_hook_dir(h->choose_dir,
         (void (*)(lua_State*, const void*))push_ghost_ctx, ctx, out);
+}
+
+bool lua_mod_game_on_dot_eaten(const lua_mod_game_ctx_t* ctx, lua_mod_dot_result_t* out) {
+    if (!mod.L || mod.game.on_dot_eaten == HOOK_NONE) {
+        return false;
+    }
+    lua_rawgeti(mod.L, LUA_REGISTRYINDEX, mod.game.on_dot_eaten);
+    push_game_ctx(mod.L, ctx);
+    if (lua_pcall(mod.L, 1, 1, 0) != LUA_OK) {
+        log_lua_error("game.on_dot_eaten");
+        return false;
+    }
+    if (lua_isnil(mod.L, -1)) {
+        lua_pop(mod.L, 1);
+        return false;
+    }
+    bool ok = parse_dot_result(mod.L, -1, out);
+    lua_pop(mod.L, 1);
+    return ok;
+}
+
+bool lua_mod_game_on_pill_eaten(const lua_mod_game_ctx_t* ctx, lua_mod_pill_result_t* out) {
+    if (!mod.L || mod.game.on_pill_eaten == HOOK_NONE) {
+        return false;
+    }
+    lua_rawgeti(mod.L, LUA_REGISTRYINDEX, mod.game.on_pill_eaten);
+    push_game_ctx(mod.L, ctx);
+    if (lua_pcall(mod.L, 1, 1, 0) != LUA_OK) {
+        log_lua_error("game.on_pill_eaten");
+        return false;
+    }
+    if (lua_isnil(mod.L, -1)) {
+        lua_pop(mod.L, 1);
+        return false;
+    }
+    bool ok = parse_pill_result(mod.L, -1, out);
+    lua_pop(mod.L, 1);
+    return ok;
+}
+
+bool lua_mod_ghost_on_collide_pacman(const lua_mod_ghost_ctx_t* ctx, lua_mod_collide_action_t* out) {
+    ghost_hooks_t* h = ghost_hooks_for(ctx->type);
+    if (!h || h->on_collide_pacman == HOOK_NONE) {
+        return false;
+    }
+    lua_rawgeti(mod.L, LUA_REGISTRYINDEX, h->on_collide_pacman);
+    push_ghost_ctx(mod.L, ctx);
+    if (lua_pcall(mod.L, 1, 1, 0) != LUA_OK) {
+        log_lua_error("ghost.on_collide_pacman");
+        return false;
+    }
+    if (lua_isnil(mod.L, -1)) {
+        lua_pop(mod.L, 1);
+        return false;
+    }
+    bool ok = parse_collide_action(mod.L, -1, out);
+    lua_pop(mod.L, 1);
+    return ok;
 }
 
 #ifdef __EMSCRIPTEN__
