@@ -2,7 +2,7 @@ name: Deploy WASM to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/lua-ghost-ai]
   workflow_dispatch:
 
 permissions:
